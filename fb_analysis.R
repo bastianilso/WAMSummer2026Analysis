@@ -234,10 +234,13 @@ Sa <- Sa %>% group_by(Participant, JudgementType) %>% mutate(
 )
 
 Sa = Sa %>% ungroup() %>% mutate(
+  throughput = fittsID / duration
+)
+
+Sa = Sa %>% ungroup() %>% mutate(
   JudgementOrder = str_remove(SessionProgram, "D3-3-2 Performance Feedback - "),
   fittsID.f = as.factor(fittsID),
   Participant.f = as.factor(Participant),
-  throughput = fittsID / duration,
   Gender.f = as.factor(Gender),
   Age.f = factor(Age, ordered=T),
   VRExperience.f = as.factor(VRExperience),
@@ -273,7 +276,18 @@ Sa = Sa %>% ungroup() %>% group_by(Participant, PerformanceFeedback) %>%
 #         hitnumber = cumsum(counter)) %>%
 #  filter(hitnumber > 5)
   
-  
+# Ssc: Summary per subcondition
+Ssc <- Sa %>% group_by(Participant, PatternSegmentLabel) %>%
+  summarize(
+    `Action Arm Travel (meter)` = mean(travel_arm),
+    `Action Duration (ms)`= mean(duration_ms),
+    `Straightness (0-1)` = mean(straightness),
+    `Peak Speed (m/s)` = mean(peak_speed_smooth),
+    `Time to Peak Speed (ms)` = mean(time_to_peak_speed_smooth_ms),
+    `Peak Speed to Target (\\%)` = mean(peak_speed_smooth_to_target_pct),
+    `Fitts ID` = mean(fittsID),
+    `Throughput (bits/s)` = mean(throughput),
+  )
 
 # Scfm: Summary of metric per feedback condition
 Scfm <- Sa %>% group_by(FeedbackJudge) %>% 
@@ -1708,7 +1722,7 @@ fig %>% add_trace(data=Sa, x=~Participant,color=~PerformanceFeedback,y=~peak_spe
 
 
 plot_bar <- function(dataset, xlabel, ylabel, desc,xtitle,ytitle,miny,maxy,lwidth,overlay = "") {
-  #browser()
+  browser()
   df = data.frame(x = dataset[[xlabel]],
                   y = as.numeric(dataset[[ylabel]]),
                   p = dataset$Participant)
@@ -1763,6 +1777,64 @@ plot_bar <- function(dataset, xlabel, ylabel, desc,xtitle,ytitle,miny,maxy,lwidt
   
   return(fig_c)
 }
+
+plot_bar <- function(dataset, xlabel, ylabel, desc,xtitle,ytitle,miny,maxy,lwidth,overlay = "") {
+  browser()
+  df = data.frame(x = dataset[[xlabel]],
+                  y = as.numeric(dataset[[ylabel]]),
+                  p = dataset$Participant)
+  
+  # Simple SD
+  #df = df %>% group_by(x) %>% summarise(mean = mean(y), sd=sd(y))
+  
+  # 95% Confidence intervals
+  df = df %>%
+    group_by(p,x) %>%
+    summarise(y = mean(y)) %>%
+    group_by(x) %>%
+    summarise(mean.y = mean(y, na.rm = TRUE),
+              sd.y = sd(y, na.rm = TRUE),
+              n.y = n()) %>%
+    mutate(se.y = sd.y / sqrt(n.y),
+           lower.ci.y = mean.y - qt(1 - (0.05 / 2), n.y - 1) * se.y,
+           upper.ci.y = mean.y + qt(1 - (0.05 / 2), n.y - 1) * se.y)
+  
+  fig_c = fig %>%
+    add_trace(data=df,
+              x=~x, y=~mean.y, color=I("grey"), #barmode='group', colors = c("lightgrey", "darkgrey", "grey"),
+              error_y=~list(symmetric=FALSE, array=upper.ci.y - mean.y, arrayminus=mean.y-lower.ci.y, color = '#000000'), type='bar') %>%
+    add_trace(data=df,
+              x=~x, y=~(upper.ci.y), color=I("black"), type='scatter', mode = 'text', text = ~paste0(format(round(upper.ci.y,0), nsmall = 0),'  '), textposition = 'middle left',
+              textfont = list(color = I("black"), size = 15)) %>%
+    add_trace(data=df,
+              x=~x, y=~(lower.ci.y), color=I("black"), type='scatter', mode = 'text', text = ~paste0(format(round(lower.ci.y,0), nsmall = 0),'  '), textposition = 'middle left',
+              textfont = list(color = I("black"), size = 15)) %>%
+    layout(margin=list(l=55,r=0,t=55,b=0),title=list(font=list(size=15), xanchor="center", xref="paper",
+                                                     text=desc), showlegend=F,
+           xaxis=list(linewidth=lwidth, range=c(-0.45,~length(unique(x)) - 0.45), title=xtitle, zeroline=F, tickfont=list(size=15)),
+           yaxis=list(linewidth=lwidth, range=c(miny,maxy), title=ytitle, zeroline=F, tickfont=list(size=15), showticklabels=T))
+  fig_c
+  if (overlay != "") {
+    svg_file_path = paste0('fig/',overlay)
+    svg_file <- readBin(svg_file_path, what="raw",n = file.info(svg_file_path)$size)
+    base64_svg <- base64enc::base64encode(svg_file)
+    base64_svg <- paste0("data:image/svg+xml;base64,", base64_svg)
+    
+    fig_c = fig_c %>%
+      layout(images = list(
+        list(
+          source = base64_svg,
+          x = 0, y = 0,  # Image position in plot coordinates (0 to 1)
+          sizex = 1, sizey = 1,  # Size of the image in plot coordinates
+          xanchor = "left", yanchor = "bottom",  # Anchor the image to the plot center
+          xref = "paper", yref = "paper"  # Referencing the image position relative to the plot area
+        )
+      ))
+  }
+  
+  return(fig_c)
+}
+
 
 plot_violin <- function(dataset, xlabel, ylabel,plabel, desc,xtitle,ytitle,miny,maxy,minx = NA,maxx = NA,bwidth,jit,overlay = "") {
   #browser()
@@ -1876,7 +1948,8 @@ for (i in 1:nrow(fig_plot)) {
                            maxy = row$maxy,
                            lwidth = row$lwidth,
                            overlay = row$overlay)
-  orca(figs[[i]], paste('fig/bar_error',row$annotation,row$y,'.pdf',sep="_"), width=row$width, height=row$height)
+  figs[[i]]
+  #orca(figs[[i]], paste('fig/bar_error',row$annotation,row$y,'.pdf',sep="_"), width=row$width, height=row$height)
 }
 
 
