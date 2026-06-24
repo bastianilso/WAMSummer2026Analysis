@@ -13,7 +13,7 @@ fig <- plot_ly() %>%
 # Load All data from the following directory
 
 # Load all metadata
-M <- LoadFromDirectory("data_20260310", event = NULL, sample = NULL)
+M <- LoadFromDirectory("data_20260318", event = NULL, sample = NULL)
 
 
 ####
@@ -26,10 +26,13 @@ M = M %>% rename(Participant = i1,
 M = M %>% mutate(Participant = as.numeric(Participant))
 
 # Filter out participant 0, who is just a test round.
-excluded_participants = c(0)
+excluded_participants = c(0,1)
 M = M %>% filter(!Participant %in% excluded_participants)
 
-M = M %>% mutate(i = paste0("data_20260310","/",Participant,"/",Session))
+M = M %>% mutate(i = paste0("data_20260318","/",Participant,"/",Session))
+
+excluded_sessions = c("Warmup-Standalone")
+M = M %>% filter(!SessionProgram %in% excluded_sessions)
 
 # Summary of actions
 Sa = NULL
@@ -41,16 +44,20 @@ Sd = NULL
 
 count = 0
 
+# remove anything not a number in M
+M = M %>% filter(!is.na(Participant))
+
+# Debug: Look at Participant 12
+#M = M %>% filter(Participant == 12)
 
 
-debug_flag = T
+debug_flag = F
 #M = M %>% filter(Participant %in% c(7))
 # We should log when people manage to identify the target, e.g. their eyes look at the right target.
 # we should also log at the very least, a direct laser coming from the persons head orientation onto the board, so get an approximation of where the person is looking.
 # Pointer Hover Begin/End seems to be swapped around and ControllerHover is sometimes reporting the wrong MoleIds ??
 # ControllerHover problems seem to be case-by-case dependent, sometimes it is fine, other times its problematic.
 for (folderpath in M$i) {
-  browser()
   D = LoadFromDirectory(folderpath)
   print(nrow(D))
   count = sum(count, nrow(D))
@@ -82,7 +89,7 @@ for (folderpath in M$i) {
   D = D %>% arrange(Timestamp)
   
   # Ensure tracking columns are not NA in-game.
-  tracking_cols = colnames(D %>% select(contains("LaserPosWorld"), contains("RotEuler"),contains("Viewport")))
+  tracking_cols = colnames(D %>% dplyr::select(dplyr::contains("LaserPosWorld"), dplyr::contains("RotEuler"),dplyr::contains("Viewport")))
   D = D %>% tidyr::fill(all_of(tracking_cols), .direction = c("downup"))
   
   # At some point 
@@ -125,7 +132,7 @@ for (folderpath in M$i) {
            PlayPeriod = ifelse(indication < 1, "PreGame", "Game"),
            PlayPeriod = ifelse(indication > 1, "PostGame", PlayPeriod),
            indication = NULL)
-  #browser()
+  
   # Fill MoleSpawnOrder and PointerShootOrder during the PlayPeriod.
   # ShootOrder reports number until
   #MoleOrder = ifelse(Event == "Mole Spawned", 1,0),
@@ -153,8 +160,8 @@ for (folderpath in M$i) {
   # We generally need to clear CalibrationPoint for all events except "Pointer Shoot" and "Mole Spawned"
   D = D %>% mutate(PatternSegmentLabel = ifelse(Event == "Game Started", NA, PatternSegmentLabel),
                    PatternSegmentLabel = ifelse(PlayPeriod == "PreGame", NA, PatternSegmentLabel))
-  
-  D = D %>% mutate(bad_labels = PatternSegmentLabel == "CalibrationPoint" & Event != "Mole Spawned",
+  #  & Event != "Mole Spawned"
+  D = D %>% mutate(bad_labels = PatternSegmentLabel %in% c("CalibrationPoint","Calibration-Point"), 
                    PatternSegmentLabel = ifelse(bad_labels, NA, PatternSegmentLabel))
   
   # experiment: see whether separating calibration point into its own column and using the patternsegmentlabel
@@ -164,12 +171,14 @@ for (folderpath in M$i) {
                    PatternSegmentLabel = case_when(PatternSegmentLabel != "CalibrationPoint" ~ PatternSegmentLabel))
   # D %>% filter(Event != "Sample") %>% select(PatternSegmentLabel, CalibrationPoint, Event) %>% view()
   
+  
   # Use 'CountDown 3' to choose an end-point for the segment, removing movement during countdown/game pause.
   #D = D %>% mutate(PatternSegmentLabel = ifelse(Event == "CountDown 3", "None", PatternSegmentLabel))
   # Ensure all cols has labels from JudgementType and PerformanceFeedback 
   # only do it downwards - warmup has no judgement/fb
   label_cols = c("JudgementType", "PerformanceFeedback", "PatternSegmentLabel","MoleSize")
   D = D %>% tidyr::fill(all_of(label_cols), .direction = c("down"))
+  
   
   # Replace NA with None
   D = D %>% replace_na(list(JudgementType = "None", PerformanceFeedback = "None", PatternSegmentLabel = "None"))
@@ -187,7 +196,7 @@ for (folderpath in M$i) {
   W = D %>% filter(Event == "CountDown 0") %>% head(1) %>%
     dplyr::reframe(x = c(unique(WallBoundsXMin),unique(WallBoundsXMin), unique(WallBoundsXMax), unique(WallBoundsXMax),unique(WallBoundsXMin)),
                    y = c(unique(WallBoundsYMin),unique(WallBoundsYMax), unique(WallBoundsYMax), unique(WallBoundsYMin),unique(WallBoundsYMin)))
-  MS = D %>% filter(Event == "MotorSpace Size Update", MotorSpaceName=="MotorSpaceR",PatternSegmentLabel=="None") %>%
+  MS = D %>% filter(Event == "MotorSpace Size Update", MotorSpaceName=="MotorSpaceR",PatternSegmentLabel %in% c("None","Calibration-Point","Baseline", "Warmup")) %>%
     summarize(width = last(MotorSpaceWidth),
               height = last (MotorSpaceHeight),
               x = last(MotorSpaceCenterPositionX),
@@ -219,7 +228,7 @@ for (folderpath in M$i) {
   ####
   # HitOrder: Determine what constitutes each player action
   ####
-  D = D %>% arrange(Timestamp) %>%
+  D = D %>% ungroup() %>% arrange(Timestamp) %>%
     dplyr::mutate(HitOrder = ifelse(Event %in% c("Mole Hit","Mole Expired"), 1, 0),
                   HitOrder = lag(HitOrder),
                   MoleOrder = ifelse(Event == "Mole Spawned", 1,0),
@@ -232,7 +241,6 @@ for (folderpath in M$i) {
                   HitOrder = ifelse(PlayPeriod %in% c("PreGame","PostGame"), NA, HitOrder),
     )
   
-  
   # flag the first action (mole to hit) after each break, so they can be filtered out.
   # important to do before we filter out cols coming before mole spawned, otherwise
   # they cant be identified.
@@ -241,6 +249,7 @@ for (folderpath in M$i) {
     HitOrder = ifelse(flag, NA, HitOrder),
   ) %>% select(-flag)
   
+  
   # filter out cols that come before Mole Spawned
   D = D %>% group_by(HitOrder) %>% dplyr::mutate(
     flag = ifelse(Event %in% c("Mole Spawned"), 1, 0),
@@ -248,12 +257,14 @@ for (folderpath in M$i) {
     HitOrder = ifelse(hit_flag == 0, NA, HitOrder),
   ) %>% select(-flag, -hit_flag)
   
+  
   # filter out actions that never complete (mole spawn, but never is hit)
   D = D %>% group_by(HitOrder) %>% dplyr::mutate(
     flag = any(Event %in% c("Mole Spawned")),
-    flag2 = any(Event %in% c("Mole Hit","Mole Expired")),
-    HitOrder = ifelse(flag == flag2, HitOrder, NA),
+    flag2 = any(Event %in% c("Mole Missed")),
+    HitOrder = ifelse(flag == flag2, NA, HitOrder),
   ) %>% select(-flag, -flag2)
+
   
   # filter out actions that were interrupted (game paused)
   D = D %>% group_by(HitOrder) %>% dplyr::mutate(
@@ -261,14 +272,49 @@ for (folderpath in M$i) {
     HitOrder = ifelse(flag, NA, HitOrder),
   ) %>% select(-flag)
   
+  # Debug:
+  #D %>% filter(!Event %in% c("Sample")) %>% select(Timestamp, Event,HitOrder, MoleOrder,MoleId) %>% view()
   
+  # # add timestamps for when hit started and ended
+  # D = D %>% group_by(HitOrder) %>% dplyr::mutate(
+  #   HitStartTimestamp = first(Timestamp),
+  #   MoleIdStart = ifelse(Event == "Mole Spawned", MoleId,NA),
+  #   HitEndTimestamp = last(Timestamp)
+  # ) %>% tidyr::fill(MoleIdStart, .direction="downup")
   
+  # CORRECTED VERSION: Ensure MoleIdStart is interpreted as "The Starting Point for the player going from A to B"
+  # and that MoleIdToHit is interpreted as "The End point for the player going from A to B"
   # add timestamps for when hit started and ended
   D = D %>% group_by(HitOrder) %>% dplyr::mutate(
     HitStartTimestamp = first(Timestamp),
-    MoleIdStart = ifelse(Event == "Mole Spawned", MoleId,NA),
+    MoleIdToHit = ifelse(Event == "Mole Spawned", MoleId,NA),
     HitEndTimestamp = last(Timestamp)
-  ) %>% tidyr::fill(MoleIdStart, .direction="downup")
+  ) %>% tidyr::fill(MoleIdToHit,HitStartTimestamp,HitEndTimestamp, .direction="downup")
+  
+  D = D %>% filter(!is.na(HitOrder)) %>% group_by(PatternSegmentLabel,HitOrder) %>% summarize(MoleIdStart = unique(MoleIdToHit)) %>% group_by(PatternSegmentLabel) %>%
+    mutate(MoleIdStart = lag(MoleIdStart)) %>% right_join(D) %>% ungroup()
+
+
+  
+  # Filter HitOrder's that contain "Feedback" (e.g. in task condition) - 
+  # our best way to identify it is that we have more than 3 seconds delay between mole spawned and previous hit.
+  D = D %>% group_by(HitOrder) %>% summarize(
+    HitStartTimestamp = unique(HitStartTimestamp),
+    HitEndTimestamp = unique(HitEndTimestamp)) %>%
+    ungroup() %>% mutate(
+      PrevHitEndTimestamp = lag(HitEndTimestamp),
+      HitToSpawnDuration = HitStartTimestamp - PrevHitEndTimestamp
+    ) %>% select(HitToSpawnDuration,HitOrder) %>% drop_na() %>% right_join(D)
+   
+  #D %>% mutate(
+  #  flag = (as.numeric(HitToSpawnDuration) > 3),
+  #  MoleIdStart = case_when(flag ~ NA,
+  #                          TRUE ~ MoleIdStart)
+  #) %>% filter(!Event %in% c("Sample"), PatternSegmentLabel %in% c('BestPerf')) %>% select(flag, Timestamp, Event,HitOrder, MoleOrder,MoleIdStart,MoleIdToHit,HitStartTimestamp,HitEndTimestamp,HitToSpawnDuration) %>% view()
+   
+  #D %>% filter(!Event %in% c("Sample"), PatternSegmentLabel %in% c('BestPerf')) %>% select(flag, Timestamp, Event,HitOrder, MoleOrder,MoleIdStart,MoleIdToHit,HitStartTimestamp,HitEndTimestamp,HitToSpawnDuration) %>% view()
+  
+  #D %>% filter(Event == "Mole Spawned") %>% mutate(MoleSpawnedTimestamp)
   
   # We will just do it at the summary stage.
   #D = D %>% ungroup() %>%
@@ -279,7 +325,7 @@ for (folderpath in M$i) {
   #  mutate(MoleIdToHit = last(MoleIdToHit))
   
   ### VERIFICATION: Checking that HitOrder is applied properly.
-  #browser()
+  
   #D %>% filter(!is.na(HitOrder)) %>% select(Framecount,Timestamp, Event, HitOrder,ActionOrder, MoleOrder, MoleIdStart) %>% view()
   
   ####
@@ -292,33 +338,58 @@ for (folderpath in M$i) {
   
   # Import actual mini-patterns
   
-  patterns = read.csv("wam_pattern.csv", sep=";")
+  #patterns = read.csv("wam_pattern.csv", sep=";")
   
-  D = D %>% left_join(patterns)
+  #D = D %>% left_join(patterns)
   
-  Sdd = D %>% filter(Event == "Mole Spawned") %>% select(Participant, MiniPatternLabel, SessionProgram,Framecount,MoleId, 
+  # Sdd = D %>% filter(Event == "Mole Spawned") %>% select(Participant, SessionProgram,Framecount,MoleId, 
+  #                                                        MolePositionWorldX, MolePositionWorldY, PatternSegmentLabel,
+  #                                                        MolePositionMSX, MolePositionMSY, MoleSize,HitOrder,MoleIdStart) %>%
+  #   group_by(PatternSegmentLabel) %>%
+  #   ungroup() %>%
+  #   mutate (NextMolePositionWorldX = lead(MolePositionWorldX),
+  #           NextMolePositionWorldY = lead(MolePositionWorldY),
+  #           NextMolePositionMSX = lead(MolePositionMSX),
+  #           NextMolePositionMSY = lead(MolePositionMSY)) %>%
+  #   filter(!is.na(NextMolePositionWorldX)) %>% rowwise() %>%
+  #   mutate(MolePositionWorld = list(data.frame('x'=c(MolePositionWorldX,NextMolePositionWorldX),
+  #                                              'y'=c(MolePositionWorldY,NextMolePositionWorldY))),
+  #          MolePositionMS = list(data.frame('x'=c(MolePositionMSX,NextMolePositionMSX),
+  #                                           'y'=c(MolePositionMSY,NextMolePositionMSY))),
+  #          dist_moleMS = st_length(st_linestring(data.matrix(data.frame(MolePositionMS)))),
+  #          dist_mole = st_length(st_linestring(data.matrix(data.frame(MolePositionWorld)))),
+  #          fittsID = log2(dist_mole / MoleSize + 1),
+  #   ) 
+  # Lag: get previous mole (previous endpoint)
+  # current (current endpoint)
+  # Lead: get next mole (next endpoint)
+  
+  #### CORRECTED: Use PrevMolePositionWorldX (where the player came from) -- NextMolePositionWorldX is not the upcoming endpoint, its the one after that!
+  Sdd = D %>% filter(Event == "Mole Spawned") %>% select(Participant, SessionProgram,Framecount,MoleId, 
                                                          MolePositionWorldX, MolePositionWorldY, PatternSegmentLabel,
                                                          MolePositionMSX, MolePositionMSY, MoleSize,HitOrder,MoleIdStart) %>%
-    #group_by(PatternSegmentLabel) %>%
-    ungroup() %>%
-    mutate (NextMolePositionWorldX = lead(MolePositionWorldX),
-            NextMolePositionWorldY = lead(MolePositionWorldY),
-            NextMolePositionMSX = lead(MolePositionMSX),
-            NextMolePositionMSY = lead(MolePositionMSY)) %>%
-    filter(!is.na(NextMolePositionWorldX)) %>% rowwise() %>%
-    mutate(MolePositionWorld = list(data.frame('x'=c(MolePositionWorldX,NextMolePositionWorldX),
-                                               'y'=c(MolePositionWorldY,NextMolePositionWorldY))),
-           MolePositionMS = list(data.frame('x'=c(MolePositionMSX,NextMolePositionMSX),
-                                            'y'=c(MolePositionMSY,NextMolePositionMSY))),
+    group_by(PatternSegmentLabel) %>%
+    mutate (PrevMolePositionWorldX = lag(MolePositionWorldX),
+            PrevMolePositionWorldY = lag(MolePositionWorldY),
+            PrevMolePositionMSX = lag(MolePositionMSX),
+            PrevMolePositionMSY = lag(MolePositionMSY)) %>%
+    filter(!is.na(PrevMolePositionWorldX)) %>% rowwise() %>%
+    mutate(MolePositionWorld = list(data.frame('x'=c(PrevMolePositionWorldX,MolePositionWorldX),
+                                               'y'=c(PrevMolePositionWorldY,MolePositionWorldY))),
+           MolePositionMS = list(data.frame('x'=c(PrevMolePositionMSX,MolePositionMSX),
+                                            'y'=c(PrevMolePositionMSY,MolePositionMSY))),
            dist_moleMS = st_length(st_linestring(data.matrix(data.frame(MolePositionMS)))),
            dist_mole = st_length(st_linestring(data.matrix(data.frame(MolePositionWorld)))),
            fittsID = log2(dist_mole / MoleSize + 1),
     ) 
   
-  Sdd = Sdd %>% ungroup() %>% mutate(
+  Sdd = Sdd %>% ungroup() %>% group_by(PatternSegmentLabel) %>% mutate(
     MoleIdToHit = lead(MoleIdStart),
     MoleCombo = paste(MoleIdStart,MoleIdToHit,sep="-"),
   )
+  
+  # 'NA' in MoleIdToHit just means that there is no mole coming after that -- does not necessarily invalidate the row.
+  
   #save(Sdd, file = 'plot_patterns.rda', compress=TRUE)
   
   #Sdd = Distances %>% group_by(PatternSegmentLabel) %>% 
@@ -346,7 +417,10 @@ for (folderpath in M$i) {
   ####
   # ControllerHover: Restore broken ControllerHover column and calcualate hover time and hover leaving time.
   ####
-  #browser()
+  
+  #D %>% select(ControllerHover,MoleIdToHit,MoleIdStart,HitOrder,Event) %>% filter(Event != "Sample") %>% view()
+  
+
   
   # Fix ControllerHover, by ensuring that any Pointer Hover event before a hit has same ID as the hit.
   # this fix only works in our case because we have a single target to hit - hard to generalize for WhackVR dashboard.
@@ -360,7 +434,9 @@ for (folderpath in M$i) {
     flag = ifelse(is.na(ControllerHover.fix) & Event == "Pointer Hover Begin", T,F)
   ) %>% filter(!flag)
   
-  # Do a filldown to catch all Pointer Hover End, and then cleanup
+  
+  
+# Do a filldown to catch all Pointer Hover End, and then cleanup
   # Also, if the mole was hovered multiple times (hover-in,hover-out), count the earliest hover and remove later occurences
   D = D %>% ungroup() %>% tidyr::fill(ControllerHover.fix, .direction="down") %>%
     mutate(
@@ -372,7 +448,11 @@ for (folderpath in M$i) {
                                       Event == "Pointer Hover End" ~ ControllerHover.fix),
       flag = ifelse(is.na(ControllerHover.fix) & Event == "Pointer Hover Begin", T,F)
     ) %>% filter(!flag)
+  #D %>% filter(!Event %in% c("Sample")) %>% select(Timestamp, Event,HitOrder, MoleOrder,ControllerHover.fix,MoleIdStart) %>% view()
   
+
+  #  filter(!Event %in% c("Sample")) %>% select(flag, Timestamp, Event,HitOrder, MoleOrder,ControllerHover.fix,MoleIdStart) %>% view()
+               
   
   # Remove unnecessary Pointer Hover Ends - choose the Pointer Hover end furthest away from Pointer Hover Begin.
   # This mean Begin/End dont necessarily represent the same hover point, however, we do ensure they are the same moleID.
@@ -398,16 +478,31 @@ for (folderpath in M$i) {
       flag3 = ifelse(is.na(ControllerHover.fix) & Event == "Pointer Hover End", T,F)
     ) %>% ungroup() %>% filter(!flag3) %>% select(-flag,-flag2,-flag3,-flagmole)
   
+  
+  # Fix Pointer Hover Ends that have wrong HitOrder assigned.
+  # When ControllerHover.fix is equal to the starting Mole ID, it actually belongs to the previous hit.
+  # SCRATCH THIS CODE - We want Pointer Hover End to belong to the next HitOrder, because it enables us to calculate the duration
+  # it took for the user to leave the previous target and move towards the next. This is easiest done if the previous Hover end
+  # is inside the right HitOrder.
+  # D = D %>% group_by(HitOrder) %>%
+  #  mutate(flag = ifelse(Event == "Pointer Hover End" & ControllerHover.fix == MoleIdStart, T, F),
+  #         HitOrder = case_when(flag ~ HitOrder-1, TRUE ~ HitOrder),
+  #         MoleIdStart = case_when(flag ~ , TRUE ~ HitOrder),)
+   
+  #D %>% filter(!Event %in% c("Sample")) %>% select(ControllerHover,ControllerHover.fix,MoleIdToHit,MoleIdStart,HitOrder,Event) %>% view()     
+  
   # Calculate Hover Leave Phase
   D = D %>% mutate(
     flag = ifelse(Event == "Pointer Hover Begin",rowindex,NA),
   ) %>% ungroup() %>% tidyr::fill(flag, .direction="downup") %>%
     group_by(flag) %>% mutate(
       time_hover_end = first(Timestamp[Event == "Pointer Hover End"]),
-      time_mole_hit = first(Timestamp[Event == "Mole Hit"]), # there may be more hits without corresponding hovers.
+      time_mole_hit = first(Timestamp[Event %in% c("Mole Hit","Mole Missed")]), # there may be more hits without corresponding hovers.
       ControllerLeaveTarget_ms = difftime(time_hover_end,time_mole_hit),
-      ControllerLeaveTarget_ms = ifelse(Event %in% c("Pointer Hover Begin","Pointer Hover End","Mole Hit"),ControllerLeaveTarget_ms,NA)
+      ControllerLeaveTarget_ms = ifelse(Event %in% c("Pointer Hover Begin","Pointer Hover End","Mole Hit","Mole Missed"),ControllerLeaveTarget_ms,NA)
     )
+  
+  
   
   # Calculate Hover Arrive Phase
   D = D %>% mutate(
@@ -424,6 +519,9 @@ for (folderpath in M$i) {
       ControllerHoverTarget_ms = ifelse(Event %in% c("Pointer Hover Begin","Pointer Hover End","Mole Hit"),ControllerHoverTarget_ms,NA)
     )
   
+  
+  #D %>% filter(!Event %in% c("Sample")) %>% select(Timestamp, Event,HitOrder, MoleOrder,ControllerHover.fix,MoleIdStart,ControllerLeaveTarget_ms,ControllerHoverTarget_ms) %>% view()
+  
   # total_time = difftime(Timestamp[Event %in% c("Game Stopped", "Game Finished")], 
   # Timestamp[Event == "Game Started"], units="secs"),
   # total_time = as.integer(total_time),
@@ -431,6 +529,7 @@ for (folderpath in M$i) {
     print(last(D$SessionProgram))
     print(last(D$Participant))
     # visualize/debug   
+    D %>% filter(Event %in% c("Mole Hit","Pointer Hover Begin","Pointer Hover End")) %>% select(Event) %>% view()
     D %>% filter(Event %in% c("Mole Hit","Pointer Hover Begin","Pointer Hover End")) %>% select(ControllerHover.fix,hasPointerHover,Timestamp, Event, ControllerHover, MoleId, HitOrder,ActionOrder, MoleOrder,PatternSegmentLabel) %>% view()
     D %>% filter(Event %in% c("Mole Spawned","Mole Hit","Pointer Hover Begin","Pointer Hover End")) %>% select(flag,flagmole,rowindex,Timestamp, Event,time_mole_hit,time_hover_begin,ControllerLeaveTarget_ms,ControllerHoverTarget_ms,ControllerHover.fix, MoleIdHover,MoleId, HitOrder,ActionOrder, MoleOrder,PatternSegmentLabel) %>% view()
     D %>% filter(HitOrder == 1) %>% select(Framecount,Timestamp, Event, ControllerHover.fix,hasPointerHover,ControllerHover,HitOrder,ActionOrder, MoleOrder, HitStartTimestamp,HitEndTimestamp,MoleId,RightControllerLaserPosWorldX,RightControllerLaserPosWorldY) %>% view()
@@ -728,7 +827,7 @@ for (folderpath in M$i) {
       timestamp_rel_norm = scales::rescale(timestamp_rel, from=c(min(timestamp_rel),max(timestamp_rel)), to=c(0,1))
     ) %>% ungroup() %>% tibble::rownames_to_column("rowindex")
   
-  #browser()
+  
   # Smooth the speed using a spline with degree 2 polynomial
   # TODO: calculate smooth speed using values normalized to 0-1
   # TODO: figure out how to set the right smoothing coefficient.
@@ -768,8 +867,8 @@ for (folderpath in M$i) {
   #interp_data$smoothed_speed <- predict(smooth_speed, interp_data$timestamp)$y
   
   if (debug_flag) {
-    #browser()
-    D %>% filter(HitOrder == 2) %>% select(Framecount,Timestamp, Event, HitOrder,ActionOrder, MoleOrder, HitStartTimestamp,HitEndTimestamp,MoleId,RightControllerLaserPosWorldX,RightControllerLaserPosWorldY) %>% view()
+    
+    D %>% filter(HitToSpawnDuration > 5) %>% select(Framecount,Timestamp, Event, PatternSegmentLabel, PerformanceFeedback, HitOrder,ActionOrder, HitToSpawnDuration, MoleOrder, HitStartTimestamp,HitEndTimestamp,MoleId,RightControllerLaserPosWorldX,RightControllerLaserPosWorldY) %>% view()
     
     
     fig %>% add_trace(name="raw",data = preds %>% filter(HitOrder == 20), type='scattergl',mode='markers', 
@@ -811,7 +910,7 @@ for (folderpath in M$i) {
              xaxis=list(range=c(0.2,0.6), zeroline=F, tickfont=list(size=15)),
              yaxis=list(range=c(0.8,1.2), zeroline=F, tickfont=list(size=15), showticklabels=T))
     
-    fig_d = fig %>% add_trace(name="raw", data = D %>% filter(Participant==9, HitOrder %in% c(187,188,189)), type='scatter',mode='markers', 
+    fig_d = fig %>% add_trace(name="raw", data = D %>% filter(HitOrder %in% c(7,8,9)), type='scatter',mode='markers', 
                               x=~RightControllerPosWorldX, y=~RightControllerPosWorldY) %>%
       layout(title=list(font=list(size=15), xanchor="center", xref="paper",
                         text=" "),
@@ -826,6 +925,7 @@ for (folderpath in M$i) {
   #### 
   #   
   # Filter out Warmup and Breaks.
+  
   invalid_segments = c("Break","BreakBig","Warmup","None")
   D = D %>% filter(!PatternSegmentLabel %in% invalid_segments)
   
@@ -897,8 +997,14 @@ for (folderpath in M$i) {
               # Calculate straightness trajectory
               # 
     )
-  
-  
+  # Debug low peak speeds in Task condition (HitToSpawnDuration, peak speed, movement)
+  #fig %>% add_trace(data=S, type='scatter',mode='marker', color=I('darkgrey'),color=~PatternSegmentLabel,
+  #                  x=~HitOrder, y=~peak_speed_smooth) %>%
+    #add_trace(data=S, x=~bind_rows(RightControllerPosWorld_euc)$x, y=~bind_rows(RightControllerPosWorld_euc)$y) %>%
+  #  layout(showlegend=F, xaxis=list(showticklabels=F),yaxis=list(showticklabels=F,zeroline=F))
+  #fig %>% add_trace(data=S %>% filter(HitOrder == 61), x=~bind_rows(RightControllerLaserPosWorld)$x, y=~bind_rows(RightControllerLaserPosWorld)$y) %>%
+  #  layout(showlegend=F, xaxis=list(showticklabels=F),yaxis=list(showticklabels=F,zeroline=F))
+
   # fig_c <- fig %>% add_trace(data=S, type='scatter',mode='marker', color=I('darkgrey'),
   #                   x=~bind_rows(RightControllerPosWorld)$x, y=~bind_rows(RightControllerPosWorld)$y) %>%
   #         add_trace(data=S, x=~bind_rows(RightControllerPosWorld_euc)$x, y=~bind_rows(RightControllerPosWorld_euc)$y) %>%
@@ -921,19 +1027,25 @@ for (folderpath in M$i) {
   ) %>% bind_cols(S)
   
   
-  S = D %>% ungroup() %>% filter(PlayPeriod == "Game", !is.na(HitOrder),!is.na(Event), Event != "Sample", LaserWithinWallBounds) %>% 
+  S = D %>% ungroup() %>% filter(PlayPeriod == "Game", !is.na(HitOrder), !is.na(MoleIdStart), !is.na(Event), Event != "Sample", LaserWithinWallBounds) %>% 
     group_by(Participant,HitOrder) %>%
     summarize(
       Event = list(data.frame('Event'=Event, 'Type'=EventType,'MoleId'=MoleId, 'MoleOrder' = MoleOrder, 'Time' = Timestamp)),
-      MolePositionMS_euc = list(data.frame('x'=last(MolePositionMSX),
-                                           'y'=last(MolePositionMSY))),
-      MolePositionWorld_euc = list(data.frame('x'=last(MolePositionWorldX),
-                                              'y'=last(MolePositionWorldY))),
+      MolePositionMS_euc = list(data.frame('x'=last(MolePositionMSX,na_rm=T),
+                                           'y'=last(MolePositionMSY,na_rm=T))),
+      MolePositionWorld_euc = list(data.frame('x'=last(MolePositionWorldX,na_rm=T),
+                                              'y'=last(MolePositionWorldY,na_rm=T))),
       travel_mole_euc = st_length(st_linestring(data.matrix(data.frame(MolePositionWorld_euc)))),
-      ControllerLeaveTarget_ms = unique(na.omit(ControllerLeaveTarget_ms)),
-      ControllerHoverTarget_ms = unique(na.omit(ControllerHoverTarget_ms)),
-      MoleIdStart = unique(MoleIdStart)
+      MoleIdStart = unique(MoleIdStart),
+      MoleIdToHit = unique(MoleIdToHit),
+      HitToSpawnDuration = unique(HitToSpawnDuration),
+      ControllerLeaveTarget_ms = last(unique(ControllerLeaveTarget_ms)), # todo: fix ControllerLeaveTarget
+      ControllerHoverTarget_ms = last(unique(ControllerHoverTarget_ms)),
     ) %>% right_join(S)
+  
+  #S %>% select(Participant,HitOrder,MoleIdStart,MoleIdToHit,ControllerLeaveTarget_ms) %>% view()
+
+  
   
   S = D %>% ungroup() %>% filter(Event == "Sample", PlayPeriod == "Game", !is.na(RightControllerLaserPosWorldX),
                                  !is.na(HitOrder)) %>% group_by(Participant,HitOrder) %>%
@@ -944,12 +1056,12 @@ for (folderpath in M$i) {
                                    'best'=CtrRInstantUpperThreshold,
                                    't'=Timestamp)),
       CtrRActionJudgement = unique(ActionJudgement),
-      PatternSegmentlabel = unique(PatternSegmentLabel),
+      PatternSegmentLabel = unique(PatternSegmentLabel),
       CtrRActionLowerThreshold = unique(ActionThresholdLower),
       CtrRActionUpperThreshold = unique(ActionThresholdUpper),
+      SessionProgram = unique(SessionProgram)
     ) %>% right_join(S)
   
-  S = S %>% ungroup() %>% mutate(MoleIdToHit = lead(MoleIdStart))
   
   # Save to Summary of Actions
   if (!is.null(Sa)) {
@@ -975,21 +1087,21 @@ save(Sd, file = 'data_patterns.rda', compress=TRUE)
 # Export to Python for machine learning
 ####
 
-Sae = Sa %>% select(Participant, HitOrder, duration, travel, travel_head, PerformanceFeedback, JudgementType, FeedbackJudge)
+#Sae = Sa %>% select(Participant, HitOrder, duration, travel, travel_head, PerformanceFeedback, JudgementType, FeedbackJudge)
 
 # todo, ensure data is between 0 and 1 for ML
 # todo, if we include positional data, it should be normalized so each action starts at 0.
 # todo, 
 
-Sae_clean = data.frame(Participant = as.integer(Sae$Participant),
-                       HitOrder = as.integer(Sae$HitOrder),
-                       duration = as.numeric(Sae$duration),
-                       travel = as.numeric(Sae$travel),
-                       travel_head = as.numeric(Sae$travel_head),
-                       PerformanceFeedback = as.character(Sae$PerformanceFeedback),
-                       JudgementType = as.character(Sae$JudgementType),
-                       FeedbackJudge = as.character(Sae$FeedbackJudge))
-save(Sae_clean, file = 'data_machine_learning.rda')
+#Sae_clean = data.frame(Participant = as.integer(Sae$Participant),
+#                       HitOrder = as.integer(Sae$HitOrder),
+#                       duration = as.numeric(Sae$duration),
+#                       travel = as.numeric(Sae$travel),
+#                       travel_head = as.numeric(Sae$travel_head),
+#                       PerformanceFeedback = as.character(Sae$PerformanceFeedback),
+#                       JudgementType = as.character(Sae$JudgementType),
+#                       FeedbackJudge = as.character(Sae$FeedbackJudge))
+#save(Sae_clean, file = 'data_machine_learning.rda')
 
 ####
 # Format columns
@@ -1024,16 +1136,16 @@ save(Sae_clean, file = 'data_machine_learning.rda')
 # Combine with Likert Scale Data
 ###
 
-Lf <- gsheet2tbl('https://docs.google.com/spreadsheets/d/1zIO96Miqkcs8eVEhIOl4ZNAv9UEz6eLxXjbFwD0R_rY/edit?gid=1857813124#gid=1857813124')
+Lf <- gsheet2tbl('https://docs.google.com/spreadsheets/d/1zIO96Miqkcs8eVEhIOl4ZNAv9UEz6eLxXjbFwD0R_rY/edit?gid=1874951812#gid=1874951812')
 
-valid_pids = 24
+valid_pids = 24 #24
 
-Lf = Lf %>% filter(Participant <= valid_pids)
+Lf = Lf %>% filter(Participant <= valid_pids, !Participant %in% excluded_participants)
 
 # Mutate VR Experience, Game Experience
-Lf = Lf %>% mutate(VRExperience = ifelse(VRExperience == "yes","yes","no"),
-                   GameExperience = ifelse(GameExperience == "yes","yes","no"),
-                   PredictedPattern = ifelse(PredictedPattern == "yes","yes","no"))
+#Lf = Lf %>% mutate(VRExperience = ifelse(VRExperience == "yes","yes","no"),
+#                   GameExperience = ifelse(GameExperience == "yes","yes","no"),
+#                   PredictedPattern = ifelse(PredictedPattern == "yes","yes","no"))
 
 # Check whether we can filldown without issues
 #Lf %>% group_by(Participant) %>% 
@@ -1044,39 +1156,54 @@ Lf = Lf %>% mutate(VRExperience = ifelse(VRExperience == "yes","yes","no"),
 
 # Cleanup JudgementType
 Lf = Lf %>% mutate(
-  Algorithm = str_replace_all(Algorithm, c("MaxSpeed" = "Speed")),
+  Metric = str_replace_all(Metric, c("MaxSpeed" = "Speed")),
   Condition = str_remove(Condition, "FB")
 )
 
 # Replace NA values with a '0' rating for help variables.
-Lf = Lf %>% mutate(PerformanceFeedback = Condition,
-                   JudgementType = Algorithm,
-                   FeedbackJudge = paste0(PerformanceFeedback,JudgementType),
-                   AlgoCorrespondFastSlow.f = `With this algorithm, the feedback clearly corresponded to whether I was fast or slow.`,
-                   HowMuchFeedback.f = `How much feedback did you get?`,
-                   FeedbackQuality.f = `Overall, How good did the feedback feel?`,
-                   FeedbackQuantity.f = `How much feedback did you get?`,
-                   OverallExperience.f = `OverallExperience`,
-                   FeedbackOverallFeel.f = `Overall, how did the [blue tail/Checkmark/HeatMap] feedback make the you feel?`,
-                   FeedbackNotice.f = `Overall, how much did you notice the [blue tail/checkmark/heatmap] feedback?`,
-                   FeedbackEncourage.f = `“The [blue tail/checkmark/heatmap] feedback encouraged me to play faster.”`,
-                   FeedbackAssessPerf.f = `“With the [blue tail/checkmark/heatmap] feedback I could easily assess how well I was performing.”`,
-                   FeedbackDistract.f = `How much did you feel that the [blue tail/checkmark/heatmap] feedback distracted you?`,
-                   FeedbackSenseDiff.f = `“With the [blue tail/checkmark/heatmap] feedback, I sensed the difference between the three algorithms.”`) %>%
-  mutate(across(ends_with(".f"), ~ factor(.,levels=c(1:7))))
+# Lf = Lf %>% mutate(PerformanceFeedback = Condition,
+#                    JudgementType = Metric,
+#                    FeedbackJudge = paste0(PerformanceFeedback,JudgementType),
+#                    AlgoCorrespond.f = `The feedback matched my own sense of how well I was doing.`,
+#                    HowMuchFeedback.f = `How much feedback did you get?`,
+#                    FeedbackQuality.f = `Overall, How good did the feedback feel?`,
+#                    FeedbackQuantity.f = `How much feedback did you get?`,
+#                    OverallExperience.f = `OverallExperience`,
+#                    FeedbackOverallFeel.f = `Overall, how did the [blue tail/Checkmark/HeatMap] feedback make the you feel?`,
+#                    FeedbackNotice.f = `Overall, how much did you notice the [blue tail/checkmark/heatmap] feedback?`,
+#                    FeedbackEncourage.f = `“The [blue tail/checkmark/heatmap] feedback encouraged me to play faster.”`,
+#                    FeedbackAssessPerf.f = `“With the [blue tail/checkmark/heatmap] feedback I could easily assess how well I was performing.”`,
+#                    FeedbackDistract.f = `How much did you feel that the [blue tail/checkmark/heatmap] feedback distracted you?`,
+#                    FeedbackSenseDiff.f = `“With the [blue tail/checkmark/heatmap] feedback, I sensed the difference between the three algorithms.”`) %>%
+#   mutate(across(ends_with(".f"), ~ factor(.,levels=c(1:7))))
+
+
+Lf = Lf %>% rename_with(~ "FeedbackEasyToInterpret", starts_with("It was easy to interpret"))
+Lf = Lf %>% rename_with(~ "FeedbackAppeal", starts_with("The feedback appealed"))
+Lf = Lf %>% rename_with(~ "FeedbackCorrespond", starts_with("The feedback matched"))
+Lf = Lf %>% rename_with(~ "FeedbackEncourage", starts_with("The feedback encouraged"))
+Lf = Lf %>% rename_with(~ "FeedbackDistract", starts_with("The feedback distracted"))
+
+Lf = Lf %>%
+  mutate(PerformanceFeedback = Condition,
+         JudgementType = Metric,
+         FeedbackJudge = paste0(PerformanceFeedback,JudgementType),
+         FeedbackEasyToInterpret.f = FeedbackEasyToInterpret,
+         FeedbackAppeal.f = FeedbackAppeal,
+         FeedbackCorrespond.f = FeedbackCorrespond,
+         FeedbackEncourage.f = FeedbackEncourage,
+         FeedbackDistract.f = FeedbackDistract,
+         OverallExperience.f = OverallExperience) %>%
+mutate(across(ends_with(".f"), ~ factor(.,levels=c(1:7))))
 
 
 # Filling
 
 # columns which need filling:
-fill_per_participant = c('VRExperience', 'VRSickness','GameExperience','OverallExperience.f','PredictedPattern','Age','Gender','Glasses','PlayedBefore', 'PreferedFeedback')
-fill_per_feedback = c('FeedbackSenseDiff.f','FeedbackDistract.f','FeedbackAssessPerf.f','FeedbackEncourage.f','FeedbackNotice.f','FeedbackOverallFeel.f','FeedbackQuality.f','FeedbackQuantity.f')
+fill_per_participant = c('Metric Order','FB Order','VRExperience', 'VRSickness','GameExperience','OverallExperience.f','PredictedPattern','Age','Gender','Glasses','PlayedBefore', 'PreferedFeedback')
 
 Lf = Lf %>% group_by(Participant) %>% 
   tidyr::fill(all_of(fill_per_participant), .direction='down')
-
-Lf = Lf %>% group_by(Participant,PerformanceFeedback) %>% 
-  tidyr::fill(all_of(fill_per_feedback), .direction='down')
 
 # Save Likert responses as RDA
 save(Lf, file = 'data_all_experiential.rda', compress=TRUE)
@@ -1086,5 +1213,5 @@ save(Lf, file = 'data_all_experiential.rda', compress=TRUE)
 # Save Final Data
 ####
 #save(D, file = 'data_all.rda', compress=TRUE)
-save(Df, file = 'data_feedback.rda', compress=TRUE)
-save(Ds, file = 'data_signifier.rda', compress=TRUE)
+#save(Df, file = 'data_feedback.rda', compress=TRUE)
+#save(Ds, file = 'data_signifier.rda', compress=TRUE)

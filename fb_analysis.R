@@ -1,8 +1,5 @@
 library(MASS)
-library(plotly)  # load plotly first to avoid it overriding mutate!
-library(sf)
 library(stats)
-library(tidyverse)
 library(lme4)
 library(MuMIn)
 library(ordinal)
@@ -10,6 +7,9 @@ library(PMCMRplus) # for friedman analysis - likert scales
 library(afex) # for repeated measures anova - perf. measures
 library(emmeans) # for rmanova post-hoc analysis
 library(MANOVA.RM)
+library(plotly)  # load plotly first to avoid it overriding mutate!
+library(sf)
+library(tidyverse)
 
 #source("utils/clmcalcutils.R")
 options(scipen = 999) # disable scientific notation
@@ -20,10 +20,14 @@ load('data_patterns.rda')
 load('data_all_experiential.rda')
 source("utils/visutils.R")
 source("utils/lmecalcutils.R")
+source("utils/beeswarm_values.R")
+source("utils/position-beeswarm.R")
 fig <- plot_ly() %>%
   config(scrollZoom = TRUE, displaylogo = FALSE, modeBarButtonsToRemove = c("pan2d","select2d","hoverCompareCartesian", "toggleSpikelines","zoom2d","toImage", "sendDataToCloud", "editInChartStudio", "lasso2d", "drawclosedpath", "drawopenpath", "drawline", "drawcircle", "eraseshape", "autoScale2d", "hoverClosestCartesian","toggleHover", "")) %>%
   layout(dragmode = "pan", showlegend=T, xaxis=list(mirror=T, ticks='outside', showline=T), yaxis=list(mirror=T, ticks='outside', showline=T))
-
+# Make PDF export work
+reticulate::use_virtualenv("/home/bastianilso/R/python-env-plotly/", required=T)
+reticulate::py_config() # verify that the correct virtual environment is used, otherwise run initkaleido.R util!
 
 
 # Plotting speed data
@@ -34,7 +38,7 @@ fig <- plot_ly() %>%
 #                           layout(showlegend=F,
 #                                  yaxis=list( zeroline=F, tickfont=list(size=15), showticklabels=T))
 
-var_names = c("Correspondence (1-7)" = "AlgoCorrespondFastSlow.f", 
+var_names = c("Correspondence (1-7)" = "FeedbackCorrespond.f", 
               "Action Arm Travel (meter)" = "travel_arm", 
               "Action Duration (ms)" = "duration_ms", 
               "Straightness (0-1)" = "straightness", 
@@ -46,6 +50,12 @@ var_names = c("Correspondence (1-7)" = "AlgoCorrespondFastSlow.f",
               "Feedback" = "PerformanceFeedback.f",
               "Metric" = "JudgementType.f",
               "Learning" = "ActionOrderFB")
+
+###
+# Filter out HitOrders that are affected by breaks (HitToSpawnDuration exceeds 10ms)
+###
+Sa = Sa %>% filter(HitToSpawnDuration < 0.10)
+
 
 ###
 # Create Aggregate Summaries
@@ -198,11 +208,41 @@ Sa = Sa %>% filter(FeedbackJudge != "NoneNone") %>%  mutate(
 ####
 # Merge Sd and Sa
 ####
-Sa = Sa %>% left_join(Sd, by=c("Participant" = "Participant", "HitOrder"))
+# Identify NA data that we cannot work with.
+#Sa %>% filter(is.na(MoleIdToHit)) %>% select(MoleIdStart, MoleIdToHit,Participant) %>% view()
+# Filter out NA data in MoleIdToHit
+Sa = Sa %>% filter(!is.na(MoleIdToHit))
+# Identify remaining NA data in SessionProgram
+#Sa %>% filter(is.na(SessionProgram)) %>% view()
+
+# Filter out moles where HitOrder is NA from Sd (meaning that this was the starting mole, therefore we cannot calculate distance from mole to mole.)
+Sd = Sd %>% filter(!is.na(HitOrder))
+
+Sa = Sa %>% left_join(Sd, by=c("Participant" = "Participant", "HitOrder", "PatternSegmentLabel","SessionProgram"))
 Sa = Sa %>% rename("MoleIdStart" = "MoleIdStart.x", "MoleIdToHit" = "MoleIdToHit.x")
 
+
+
+
 #Sa <- Sa %>% left_join(Sd, by=c("Participant" = "Participant", "FeedbackJudge" = "PatternSegmentLabel"))
-Sa <- Sa %>% left_join(Lf)
+
+# Work-around weird data in P1
+
+#Sa %>% filter(Participant == 1) %>% select(SessionProgram,FeedbackJudge,MoleIdToHit,HitOrder) %>% view()
+Sa = Sa %>% separate(SessionProgram, into = c("SessionProgramP","SessionProgramCondition","SessionProgramMetric"), sep = "-",remove=F)
+Sa = Sa %>% mutate(
+  SessionProgramMetric = str_replace_all(SessionProgramMetric, c("MaxSpeed" = "Speed")),
+  SessionProgramCondition = str_remove(SessionProgramCondition, "FB")
+)
+
+
+
+Sa <- Sa %>% left_join(Lf, by=c("Participant" = "Participant", 
+                                "SessionProgramCondition" = "Condition", 
+                                "SessionProgramMetric" = "Metric", "JudgementType",
+                                "FeedbackJudge", "PerformanceFeedback"))
+
+
 
 # fittsID for arm euc
 Sa = Sa %>% mutate(
@@ -238,7 +278,7 @@ Sa = Sa %>% ungroup() %>% mutate(
 )
 
 Sa = Sa %>% ungroup() %>% mutate(
-  JudgementOrder = str_remove(SessionProgram, "D3-3-2 Performance Feedback - "),
+  JudgementOrder = `Metric Order`,
   fittsID.f = as.factor(fittsID),
   Participant.f = as.factor(Participant),
   Gender.f = as.factor(Gender),
@@ -265,6 +305,117 @@ Sa = Sa %>% ungroup() %>% group_by(Participant, PerformanceFeedback) %>%
          PlayOrderFB = PlayOrderFB - min(PlayOrderFB),
          ActionOrderFB = ActionOrder-min(ActionOrder))
 
+# Ssc: Summary per subcondition
+Ssc <- Sa %>% group_by(Participant,SessionProgram,PatternSegmentLabel) %>%
+  summarize(
+    `Action Arm Travel (meter)` = mean(travel_arm),
+    `Action Arm Travel (meter)` = mean(travel_arm),
+    `Action Duration (ms)`= median(duration_ms),
+    `Action Duration (ms)`= median(duration_ms),
+    `Straightness (0-1)` = median(straightness),
+    `Peak Speed (m/s)` = median(peak_speed_smooth),
+    `Time to Peak Speed (ms)` = median(time_to_peak_speed_smooth_ms),
+    `Peak Speed to Target (\\%)` = median(peak_speed_smooth_to_target_pct),
+    `Fitts ID` = median(fittsID,na.rm=T),
+    `Throughput (bits/s)` = median(throughput,na.rm=T),
+    PerformanceFeedback = paste0(unique(PerformanceFeedback),collapse=","),
+    JudgementType = paste0(unique(JudgementType),collapse=","),
+    FeedbackJudge = paste0(unique(FeedbackJudge),collapse=","),
+    FeedbackEasyToInterpret = paste0(unique(FeedbackEasyToInterpret),collapse=","),
+    FeedbackAppeal = paste0(unique(FeedbackAppeal),collapse=","),
+    FeedbackCorrespond = paste0(unique(FeedbackCorrespond),collapse=","),
+    FeedbackEncourage = paste0(unique(FeedbackEncourage),collapse=","),
+    FeedbackDistract = paste0(unique(FeedbackDistract),collapse=","),
+    FeedbackEasyToInterpret = as.numeric(FeedbackEasyToInterpret),
+    FeedbackAppeal = as.numeric(FeedbackAppeal),
+    FeedbackCorrespond = as.numeric(FeedbackCorrespond),
+    FeedbackEncourage = as.numeric(FeedbackEncourage),
+    FeedbackDistract = as.numeric(FeedbackDistract)
+  ) %>% ungroup() %>% group_by(Participant) %>% mutate(Order = row_number())
+
+Ssc$Order = 1:nrow(Ssc)
+Ssc = Ssc %>% 
+  mutate(Order.f = paste0(Order,"-",SessionProgram,PatternSegmentLabel))
+
+# Create baseline-subtracted variables
+Sa_baseline = Ssc %>% filter(PatternSegmentLabel == "Baseline") %>% 
+  select(baseline_throughput = `Throughput (bits/s)`, 
+         baseline_straightness = `Straightness (0-1)`,
+         baseline_duration = `Action Duration (ms)`,
+         baseline_peakspeed = `Peak Speed (m/s)`,
+         SessionProgram)
+
+Sa = Sa %>% left_join(Sa_baseline)
+
+Sa = Sa %>% mutate(
+  straightness_rel = straightness - baseline_straightness,
+  duration_rel = duration_ms - baseline_duration,
+  peakspeed_rel = peak_speed_smooth - baseline_peakspeed,
+  throughput_rel = throughput - baseline_throughput,
+  straightness_pct = straightness / baseline_straightness,
+  duration_pct =  1+(1-(duration_ms / baseline_duration)),
+  peakspeed_pct = peak_speed_smooth / baseline_peakspeed,
+  PerformanceFeedback.f = factor(PerformanceFeedback, levels=c("None","Operation","Action","Task")),
+  perf_to_baseline = case_when(JudgementType == "Distance" ~ straightness_pct,
+                               JudgementType == "Speed" ~ peakspeed_pct,
+                               JudgementType == "Time" ~ duration_pct,
+                               TRUE ~ NA)
+)
+
+
+Ssc_baseline = Ssc %>% filter(PatternSegmentLabel == "Baseline") %>% 
+  select(baseline_throughput = `Throughput (bits/s)`, 
+         baseline_straightness = `Straightness (0-1)`,
+         baseline_duration = `Action Duration (ms)`,
+         baseline_peakspeed = `Peak Speed (m/s)`,
+         SessionProgram)
+
+Ssc = Ssc %>% left_join(Ssc_baseline)
+
+Ssc = Ssc %>% mutate(
+  straightness_rel = `Straightness (0-1)` - baseline_straightness,
+  duration_rel = `Action Duration (ms)` - baseline_duration,
+  peakspeed_rel = `Peak Speed (m/s)` - baseline_peakspeed,
+  straightness_pct = `Straightness (0-1)` / baseline_straightness,
+  duration_pct =  1+(1-(`Action Duration (ms)` / baseline_duration)),
+  peakspeed_pct = `Peak Speed (m/s)` / baseline_peakspeed,
+  perf_to_baseline = case_when(JudgementType == "Distance" ~ straightness_pct,
+                               JudgementType == "Speed" ~ peakspeed_pct,
+                               JudgementType == "Time" ~ duration_pct,
+                               TRUE ~ NA),
+  throughput_to_baseline = `Throughput (bits/s)` - baseline_throughput,
+  PerformanceFeedback.f = factor(PerformanceFeedback, levels=c("None","Operation","Action","Task"))
+)
+
+
+
+Sscj = Sa %>% filter(PatternSegmentLabel %in% c("BestPerf","Instructed","NoFeedback")) %>% group_by(Participant,JudgementType) %>%
+  summarize(
+    `Action Duration (ms)`= median(duration_rel),
+    `Straightness (0-1)` = median(straightness_rel),
+    `Peak Speed (m/s)` = median(peakspeed_rel),
+    `Throughput (bits/s)` = median(throughput_rel,na.rm=T),
+  )
+
+Sscjp = Sa %>% filter(PatternSegmentLabel %in% c("BestPerf","Instructed","NoFeedback")) %>% group_by(Participant,JudgementType,PatternSegmentLabel) %>%
+  summarize(
+    `Action Duration (ms)`= median(duration_rel),
+    `Straightness (0-1)` = median(straightness_rel),
+    `Peak Speed (m/s)` = median(peakspeed_rel),
+    `Throughput (bits/s)` = median(throughput_rel,na.rm=T),
+  )
+
+Sscjp = Sscj %>% mutate(
+  JudgementPattern = paste0(JudgementType,"-",PatternSegmentLabel)
+)
+
+Sscp = Sa %>% filter(PatternSegmentLabel %in% c("BestPerf","Instructed","NoFeedback")) %>% group_by(Participant,PatternSegmentLabel) %>%
+  summarize(
+    `Action Duration (ms)`= median(duration_rel),
+    `Straightness (0-1)` = median(straightness_rel),
+    `Peak Speed (m/s)` = median(peakspeed_rel),
+    `Throughput (bits/s)` = median(throughput_rel,na.rm=T),
+  )
 
 ###
 # Remove First Five Actions Where Feedback System Gets Calibrated
@@ -276,23 +427,312 @@ Sa = Sa %>% ungroup() %>% group_by(Participant, PerformanceFeedback) %>%
 #         hitnumber = cumsum(counter)) %>%
 #  filter(hitnumber > 5)
   
-# Ssc: Summary per subcondition
-Ssc <- Sa %>% group_by(Participant, PatternSegmentLabel) %>%
-  summarize(
-    `Action Arm Travel (meter)` = mean(travel_arm),
-    `Action Duration (ms)`= mean(duration_ms),
-    `Straightness (0-1)` = mean(straightness),
-    `Peak Speed (m/s)` = mean(peak_speed_smooth),
-    `Time to Peak Speed (ms)` = mean(time_to_peak_speed_smooth_ms),
-    `Peak Speed to Target (\\%)` = mean(peak_speed_smooth_to_target_pct),
-    `Fitts ID` = mean(fittsID),
-    `Throughput (bits/s)` = mean(throughput),
-  )
+# We apply medians because they are more resistant to outliers, e.g. maxspeed max is 16 but most are around 0-5.
+
+
+fig %>%
+  add_trace(data=Sa %>% filter(!PatternSegmentLabel %in% c("Calibration-Point"),
+                               JudgementType %in% c("Speed")), 
+            x=~HitOrder,
+            color=~PerformanceFeedback,
+            y=~peak_speed_smooth,
+            type="scatter",mode="markers",marker=list(size=3,line=list(width=1.5))) %>%
+  layout(margin=list(l=0,r=0,t=55,b=0),title=list(font=list(size=15), xanchor="center", xref="paper",
+                                                  text="1234"), showlegend=F)
+
+#fig %>%
+#  add_trace(data=Sa %>% filter(!PatternSegmentLabel %in% c("Calibration-Point"), JudgementType %in% c("Distance")), x=~paste0(Participant,PatternSegmentLabel), 
+#            y=~jitter(travel_arm,amount=.05),
+#            scalemode='width', points='all', pointpos=0,name='C', jitter=.65, meanline=list(visible=T,width=4,color="rgba(0, 0, 0, 255)"),
+#            symbol=I('o'),marker=list(size=10,line=list(width=1.5)),
+#            scalegroup='C', type="violin", spanmode="soft", width=1, fillcolor = "rgba(0, 0, 0, 0)", bandwidth=.5, color=I("rgba(0, 0, 0, 0.1)")) %>%
+#  layout(margin=list(l=0,r=0,t=55,b=0),title=list(font=list(size=15), xanchor="center", xref="paper",
+#                                                  text="1234"), showlegend=F)
+
+fig %>%
+  add_trace(data=Sa %>% filter(PatternSegmentLabel %in% c("Instructed"), JudgementType %in% c("Speed"),PerformanceFeedback %in% c("Task")), x=~HitOrder, 
+            y=~peak_speed_smooth,type='scatter',mode='markers+lines',color=I('rgba(0,0,0,0.15)')) %>%
+  layout(margin=list(l=0,r=0,t=55,b=0),title=list(font=list(size=15), xanchor="center", xref="paper",
+                                                  text="1234"), showlegend=F)
+
+
+
+# position_beeswarm(yLim.expand, xRange, yRange, method = "swarm", 
+#                   cex = 1,  side = 0L, priority = "ascending", 
+#                   fast = TRUE, corral = "none", corral.width = 0.2, 
+#                   preserve.data.axis = FALSE)
+
+#beeswarm_values(Ssc$duration_rel,as.numeric(Ssc$PerformanceFeedback.f),xRange=2,yRange=1)
+
+#save(Ssc, file = 'student_fb.rda', compress=TRUE)
+
+###
+# Ssc Plotting
+###
+
+# Metrics per Feedback Type
+fig_c <- plot_scatter(dataset = Ssc %>% filter(JudgementType == "Time", 
+                                               PatternSegmentLabel %in% c("Instructed","BestPerf","NoFeedback")) %>% 
+                        group_by(Participant,PerformanceFeedback.f) %>% summarize(duration_rel = mean(duration_rel)) %>%
+                        ungroup(), 
+                      xlabel = "PerformanceFeedback.f",
+                      ylabel = "duration_rel", 
+                      plabel = "Participant",
+                      desc = "Duration (ms)", 
+                      miny = -600, 
+                      maxy = 300,
+                      jit = 2.50)
+fig_c
+save_image(fig_c, "fig/duration_relative_feedback.pdf", width=335, height=295)
+fig_c <- plot_scatter(dataset = Ssc %>% filter(JudgementType == "Distance", 
+                                               PatternSegmentLabel %in% c("Instructed","BestPerf","NoFeedback")) %>%
+                        group_by(Participant,PerformanceFeedback.f) %>% summarize(straightness_rel = mean(straightness_rel)) %>% ungroup(), 
+                      xlabel = "PerformanceFeedback.f",
+                      ylabel = "straightness_rel", 
+                      plabel = "Participant",
+                      desc = "Straightness (%)", 
+                      miny = -0.15, 
+                      maxy = 0.35,
+                      jit = 2.50)
+fig_c
+save_image(fig_c, "fig/straightness_relative_feedback.pdf", width=335, height=295)
+fig_c <- plot_scatter(dataset = Ssc %>% filter(JudgementType == "Speed", 
+                                               PatternSegmentLabel %in% c("Instructed","BestPerf","NoFeedback")) %>%
+                        group_by(Participant,PerformanceFeedback.f) %>% summarize(peakspeed_rel = mean(peakspeed_rel)) %>% ungroup(), 
+                      xlabel = "PerformanceFeedback.f",
+                      ylabel = "peakspeed_rel", 
+                      plabel = "Participant",
+                      desc = "Peak Speed (m/s)", 
+                      miny = -0.5, 
+                      maxy = 1.2,
+                      jit = 2.50)
+fig_c
+save_image(fig_c, "fig/peakspeed_relative_feedback.pdf", width=335, height=295)
+
+
+fig_c = fig %>%
+  add_trace(data=Ssc, x=~factor(PatternSegmentLabel, levels=c("Baseline","Explore","BestPerf","Instructed","NoFeedback")), 
+            y=~perf_to_baseline,
+            scalemode='width', points='all', pointpos=0,name='C', jitter=.65, meanline=list(visible=T,width=4,color="rgba(0, 0, 0, 255)"),
+            symbol=I('o'),marker=list(size=10,line=list(width=1.5)),
+            scalegroup='C', type="violin", spanmode="soft", width=1, fillcolor = "rgba(0, 0, 0, 0)", bandwidth=.5, color=I("rgba(0, 0, 0, 0.1)")) %>%
+  layout(margin=list(l=0,r=0,t=55,b=0),title=list(font=list(size=15), xanchor="center", xref="paper",
+                                                  text=" "), showlegend=F)
+fig_c
+#list_of_figs = facet_plot(Ssc, "JudgementType", fig)
+#subplot(list_of_figs)
+
+# Comparing the different phases in terms of performance.
+subplot(
+fig %>%
+  add_trace(data=Ssc %>% filter(PerformanceFeedback %in% c("Operation","None") ), x=~factor(PatternSegmentLabel,levels=c("Baseline","Explore","BestPerf","Instructed","NoFeedback")), 
+            y=~perf_to_baseline,
+            scalemode='width', points='all', pointpos=0,name='C', jitter=.65, meanline=list(visible=T,width=4,color="rgba(0, 0, 0, 255)"),
+            symbol=I('o'),marker=list(size=10,line=list(width=1.5)),
+            scalegroup='C', type="violin", spanmode="soft", width=1, fillcolor = "rgba(0, 0, 0, 0)", bandwidth=.5, color=I("rgba(0, 0, 0, 0.1)")) %>%
+  layout(margin=list(l=0,r=0,t=55,b=0),title=list(font=list(size=15), xanchor="center", xref="paper",
+                                                  text=" "), showlegend=F),
+fig %>%
+  add_trace(data=Ssc %>% filter(PerformanceFeedback %in% c("Action","None") ), x=~factor(PatternSegmentLabel,levels=c("Baseline","Explore","BestPerf","Instructed","NoFeedback")), 
+            y=~perf_to_baseline,
+            scalemode='width', points='all', pointpos=0,name='C', jitter=.65, meanline=list(visible=T,width=4,color="rgba(0, 0, 0, 255)"),
+            symbol=I('o'),marker=list(size=10,line=list(width=1.5)),
+            scalegroup='C', type="violin", spanmode="soft", width=1, fillcolor = "rgba(0, 0, 0, 0)", bandwidth=.5, color=I("rgba(0, 0, 0, 0.1)")) %>%
+  layout(margin=list(l=0,r=0,t=55,b=0),title=list(font=list(size=15), xanchor="center", xref="paper",
+                                                  text=" "), showlegend=F),
+fig %>%
+  add_trace(data=Ssc %>% filter(PerformanceFeedback %in% c("Task","None") ), x=~factor(PatternSegmentLabel,levels=c("Baseline","Explore","BestPerf","Instructed","NoFeedback")), 
+            y=~perf_to_baseline,
+            scalemode='width', points='all', pointpos=0,name='C', jitter=.65, meanline=list(visible=T,width=4,color="rgba(0, 0, 0, 255)"),
+            symbol=I('o'),marker=list(size=10,line=list(width=1.5)),
+            scalegroup='C', type="violin", spanmode="soft", width=1, fillcolor = "rgba(0, 0, 0, 0)", bandwidth=.5, color=I("rgba(0, 0, 0, 0.1)")) %>%
+  layout(margin=list(l=0,r=0,t=55,b=0),title=list(font=list(size=15), xanchor="center", xref="paper",
+                                                  text=" "), showlegend=F)
+)
+
+# Metrics -- Instructed vs Not Instructed
+fig_c <- plot_scatter(dataset = Ssc %>% filter(JudgementType == "Speed", 
+                                               PatternSegmentLabel %in% c("Instructed","BestPerf","NoFeedback")) %>% ungroup(), 
+                      xlabel = "PatternSegmentLabel",
+                      ylabel = "peakspeed_rel", 
+                      plabel = "Participant",
+                      desc = "Peak Speed (m/s)", 
+                      xtitle = " ", 
+                      ytitle = " ", 
+                      miny = -0.8, 
+                      maxy = 1.2,
+                      jit = 2.50)
+fig_c
+save_image(fig_c, "fig/peakspeed_relative_instruction.pdf", width=335, height=295)
+
+fig_c <- plot_scatter(dataset = Ssc %>% filter(JudgementType == "Time", 
+                                               PatternSegmentLabel %in% c("Instructed","BestPerf","NoFeedback")) %>% ungroup(), 
+                      xlabel = "PatternSegmentLabel",
+                      ylabel = "duration_rel", 
+                      plabel = "Participant",
+                      desc = "Duration (ms)", 
+                      xtitle = " ", 
+                      ytitle = "", 
+                      miny = -600, 
+                      maxy = 300,
+                      jit = 2.50)
+fig_c
+save_image(fig_c, "fig/duration_relative_instruction.pdf", width=335, height=295)
+fig_c <- plot_scatter(dataset = Ssc %>% filter(JudgementType == "Distance", 
+                                               PatternSegmentLabel %in% c("Instructed","BestPerf","NoFeedback")) %>% ungroup(), 
+                      xlabel = "PatternSegmentLabel",
+                      ylabel = "straightness_rel", 
+                      plabel = "Participant",
+                      desc = "Straightness (%)", 
+                      xtitle = " ", 
+                      ytitle = " ", 
+                      miny = -0.15, 
+                      maxy = 0.35,
+                      jit = 2.50)
+fig_c
+save_image(fig_c, "fig/straightness_relative_instruction.pdf", width=335, height=295)
+
+###
+# Performance Metrics Overall
+###
+
+fig_c <- plot_scatter(dataset = Sscj %>% ungroup(), 
+                      xlabel = "JudgementType",
+                      ylabel = "Straightness (0-1)", 
+                      plabel = "Participant",
+                      desc = "Straightness (%)",
+                      xtitle = " ", 
+                      ytitle = " ", 
+                      miny = -0.15, 
+                      maxy = 0.15,
+                      jit = 2.50)
+fig_c
+save_image(fig_c, "fig/straightness_relative_metric_compare.pdf", width=335, height=295)
+
+fig_c <- plot_scatter(dataset = Sscj %>% ungroup(), 
+                      xlabel = "JudgementType",
+                      ylabel = "Action Duration (ms)", 
+                      plabel = "Participant",
+                      desc = "Action Duration (ms)", 
+                      xtitle = " ", 
+                      ytitle = " ", 
+                      miny = -350, 
+                      maxy = 350,
+                      jit = 2.50)
+fig_c
+save_image(fig_c, "fig/duration_relative_metric_compare.pdf", width=335, height=295)
+
+fig_c <- plot_scatter(dataset = Sscj %>% ungroup(), 
+                      xlabel = "JudgementType",
+                      ylabel = "Peak Speed (m/s)", 
+                      plabel = "Participant",
+                      desc = "Peak Speed (m/s)", 
+                      xtitle = " ", 
+                      ytitle = " ", 
+                      miny = -0.75, 
+                      maxy = 0.75,
+                      jit = 2.50)
+fig_c
+save_image(fig_c, "fig/peakspeed_relative_metric_compare.pdf", width=335, height=295)
+
+
+###
+# Experiential Measures - JudgementType
+###
+fig_c <- plot_scatter(dataset = Ssc %>% filter(PerformanceFeedback %in% c('Action','Task','Operation')) %>%
+                        group_by(Participant, JudgementType) %>% 
+                        summarize(FeedbackEasyToInterpret = mean(as.numeric(FeedbackEasyToInterpret), na.rm=T)), 
+                      xlabel = "JudgementType",
+                      ylabel = "FeedbackEasyToInterpret", 
+                      plabel = "Participant",
+                      desc = "Feedback Easy To Interpret", 
+                      xtitle = " ", 
+                      ytitle = " ", 
+                      miny = -0.15, 
+                      maxy = 7.35,
+                      jit = 2.50)
+fig_c
+
+fig_c <- plot_scatter(dataset = Ssc %>% filter(PerformanceFeedback %in% c('Action','Task','Operation')) %>%
+                        group_by(Participant, JudgementType) %>% 
+                        summarize(FeedbackAppeal = mean(as.numeric(FeedbackAppeal), na.rm=T)), 
+                      xlabel = "JudgementType",
+                      ylabel = "FeedbackAppeal", 
+                      plabel = "Participant",
+                      desc = "Feedback Appealed", 
+                      xtitle = " ", 
+                      ytitle = " ", 
+                      miny = -0.15, 
+                      maxy = 7.35,
+                      jit = 2.50)
+fig_c
+
+fig_c <- plot_scatter(dataset = Ssc %>% filter(PerformanceFeedback %in% c('Action','Task','Operation')) %>%
+                        group_by(Participant, PerformanceFeedback) %>% 
+                        summarize(FeedbackAppeal = mean(as.numeric(FeedbackAppeal), na.rm=T)), 
+                      xlabel = "PerformanceFeedback",
+                      ylabel = "FeedbackAppeal", 
+                      plabel = "Participant",
+                      desc = "Feedback Appealed", 
+                      xtitle = " ", 
+                      ytitle = " ", 
+                      miny = -0.15, 
+                      maxy = 7.35,
+                      jit = 2.50)
+fig_c
+
+fig_c <- plot_scatter(dataset = Ssc %>% filter(PerformanceFeedback %in% c('Action','Task','Operation')) %>%
+                        group_by(Participant, PerformanceFeedback) %>% 
+                        summarize(FeedbackDistract = mean(as.numeric(FeedbackDistract), na.rm=T)), 
+                      xlabel = "PerformanceFeedback",
+                      ylabel = "FeedbackDistract", 
+                      plabel = "Participant",
+                      desc = "Feedback Appealed", 
+                      xtitle = " ", 
+                      ytitle = " ", 
+                      miny = -0.15, 
+                      maxy = 7.35,
+                      jit = 2.50)
+fig_c
+
+fig_c <- plot_scatter(dataset = Ssc %>% filter(PerformanceFeedback %in% c('Action','Task','Operation')) %>%
+                        group_by(Participant, PerformanceFeedback) %>% 
+                        summarize(FeedbackCorrespond = mean(as.numeric(FeedbackCorrespond), na.rm=T)), 
+                      xlabel = "PerformanceFeedback",
+                      ylabel = "FeedbackCorrespond", 
+                      plabel = "Participant",
+                      desc = "Feedback Corresponded", 
+                      xtitle = " ", 
+                      ytitle = " ", 
+                      miny = -0.15, 
+                      maxy = 7.35,
+                      jit = 2.50)
+fig_c
+
+fig_c <- plot_scatter(dataset = Ssc %>% filter(PerformanceFeedback %in% c('Action','Task','Operation')) %>%
+                        group_by(Participant, PerformanceFeedback) %>% 
+                        summarize(FeedbackEncourage = mean(as.numeric(FeedbackEncourage), na.rm=T)), 
+                      xlabel = "PerformanceFeedback",
+                      ylabel = "FeedbackEncourage", 
+                      plabel = "Participant",
+                      desc = "Feedback Encouraged", 
+                      xtitle = " ", 
+                      ytitle = " ", 
+                      miny = -0.15, 
+                      maxy = 7.35,
+                      jit = 2.50)
+fig_c
+
+
+
+###
+# Previous Code
+###
 
 # Scfm: Summary of metric per feedback condition
 Scfm <- Sa %>% group_by(FeedbackJudge) %>% 
   summarize(
-    `Correspondence (1-7)` = mean(as.numeric(AlgoCorrespondFastSlow.f)),
+    `Correspondence (1-7)` = mean(as.numeric(FeedbackCorrespond.f)),
     `Action Arm Travel (meter)` = mean(travel_arm),
     `Action Duration (ms)`= mean(duration_ms),
     `Straightness (0-1)` = mean(straightness),
@@ -305,7 +745,7 @@ Scfm <- Sa %>% group_by(FeedbackJudge) %>%
 
 Scfm_sd <- Sa %>% group_by(FeedbackJudge) %>% 
   summarize(
-    `Correspondence (1-7)` = sd(as.numeric(AlgoCorrespondFastSlow.f)),
+    `Correspondence (1-7)` = sd(as.numeric(FeedbackCorrespond.f)),
     `Action Arm Travel (meter)` = sd(travel_arm),
     `Action Duration (ms)`= sd(duration_ms),
     `Straightness (0-1)` = sd(straightness),
@@ -318,7 +758,7 @@ Scfm_sd <- Sa %>% group_by(FeedbackJudge) %>%
 
 Scmm <- Sa %>% group_by(JudgementType) %>% 
   summarize(
-    `Correspondence (1-7)` = mean(as.numeric(AlgoCorrespondFastSlow.f)),
+    `Correspondence (1-7)` = mean(as.numeric(FeedbackCorrespond.f)),
     `Action Arm Travel (meter)` = mean(travel_arm),
     `Action Duration (ms)`= mean(duration_ms),
     `Straightness (0-1)` = mean(straightness),
@@ -331,7 +771,7 @@ Scmm <- Sa %>% group_by(JudgementType) %>%
 
 Scmm_sd <- Sa %>% group_by(JudgementType) %>% 
   summarize(
-    `Correspondence (1-7)` = sd(as.numeric(AlgoCorrespondFastSlow.f)),
+    `Correspondence (1-7)` = sd(as.numeric(FeedbackCorrespond.f)),
     `Action Arm Travel (meter)` = sd(travel_arm),
     `Action Duration (ms)`= sd(duration_ms),
     `Straightness (0-1)` = sd(straightness),
@@ -349,10 +789,10 @@ Scmm_sd <- Sa %>% group_by(JudgementType) %>%
 # Scf: Summary of feedback condition
   
   
-  # Aggregate how much travel
+# Aggregate how much travel
 
-sum_cols = c("AlgoCorrespondFastSlow.f", "HowMuchFeedback.f", "FeedbackQuality.f", "OverallExperience.f", "FeedbackOverallFeel.f", "FeedbackNotice.f","FeedbackEncourage.f","FeedbackAssessPerf.f","FeedbackDistract.f","FeedbackSenseDiff.f")
-sum_cols_sa = c("travel", "duration","travel_head")
+#sum_cols = c("FeedbackCorrespond.f", "HowMuchFeedback.f", "FeedbackQuality.f", "OverallExperience.f", "FeedbackOverallFeel.f", "FeedbackNotice.f","FeedbackEncourage.f","FeedbackAssessPerf.f","FeedbackDistract.f","FeedbackSenseDiff.f")
+#sum_cols_sa = c("travel", "duration","travel_head")
 
 # Summarize means for conditions
 #Lf %>% group_by(Condition) %>% select(all_of(sum_cols)) %>%
@@ -375,7 +815,7 @@ Sc = Sa %>% group_by(Participant, FeedbackJudge.f) %>%
     `Peak Speed (m/s)` = mean(peak_speed_smooth),
     `Time to Peak Speed (ms)` = mean(time_to_peak_speed_smooth_ms),
     `Peak Speed to Target (\\%)` = mean(peak_speed_smooth_to_target_pct),
-    `Correspondence` = unique(AlgoCorrespondFastSlow.f),
+    `Correspondence` = unique(FeedbackCorrespond.f),
      MiniPatternLabel = paste(unique(MiniPatternLabel),collapse=", "),
     `Performance Feedback` = unique(PerformanceFeedback.f),
     `Performance Metric` = unique(JudgementType),
@@ -429,7 +869,7 @@ Scf = Sa %>% group_by(Participant, PerformanceFeedback.f) %>%
     `Peak Speed (m/s)` = mean(peak_speed_smooth),
     `Time to Peak Speed (ms)` = mean(time_to_peak_speed_smooth_ms),
     `Peak Speed to Target (\\%)` = mean(peak_speed_smooth_to_target_pct),
-    `Correspondence` = mean(as.numeric(AlgoCorrespondFastSlow.f)),
+    `Correspondence` = mean(as.numeric(FeedbackCorrespond.f)),
     `Overall Feel` = unique(FeedbackOverallFeel.f),
     `Distraction` = unique(FeedbackDistract.f),
     `Quality` = unique(FeedbackQuality.f),
@@ -461,7 +901,7 @@ Scm = Sa %>% group_by(Participant, JudgementType.f) %>%
     `Peak Speed (m/s)` = mean(peak_speed_smooth),
     `Time to Peak Speed (ms)` = mean(time_to_peak_speed_smooth_ms),
     `Peak Speed to Target (\\%)` = mean(peak_speed_smooth_to_target_pct),
-    `Correspondence` = mean(as.numeric(AlgoCorrespondFastSlow.f)),
+    `Correspondence` = mean(as.numeric(FeedbackCorrespond.f)),
     `Performance Metric` = paste(unique(JudgementType),collapse=", "),
     `Throughput (bits/s)` = mean(throughput),
     JudgementOrder = paste(unique(str_remove(SessionProgram, "D3-3-2 Performance Feedback - "))),
@@ -544,7 +984,7 @@ Sp = Sa %>% group_by(Participant) %>%
 # Spf: Summary of Participants in the feedback space.
 Spf = Sa %>% group_by(Participant, PerformanceFeedback.f) %>%
   summarise(
-    `Correspondence` = mean(as.numeric(AlgoCorrespondFastSlow.f)),
+    `Correspondence` = mean(as.numeric(FeedbackCorrespond.f)),
     `Overall Feel` = unique(FeedbackOverallFeel.f),
     `Distraction` = unique(FeedbackDistract.f),
     `Quality` = unique(FeedbackQuality.f),
@@ -805,7 +1245,7 @@ Sa %>% group_by(FeedbackJudge.f) %>% summarise(
 
 # Who received lowest correspondence ratings?
 Sa %>% group_by(JudgementType.f) %>% summarise(
-  correspondence = mean(as.numeric(AlgoCorrespondFastSlow.f))
+  correspondence = mean(as.numeric(FeedbackCorrespond.f))
 )
 
 ###
@@ -905,9 +1345,132 @@ fig_c <- fig %>%
 return(fig_c)
 }
 
+Lf = Lf %>% mutate(FeedbackMetric = paste0(Condition,"-",Metric))
+Lfm = Lf %>% group_by(Participant,JudgementType) %>%
+  summarize(
+    FeedbackEasyToInterpret = mean(FeedbackEasyToInterpret, na.rm=T),
+    FeedbackAppeal = mean(FeedbackAppeal, na.rm=T),
+    FeedbackCorrespond = mean(FeedbackCorrespond, na.rm=T),
+    FeedbackEncourage = mean(FeedbackEncourage, na.rm=T),
+    FeedbackDistract = mean(FeedbackDistract, na.rm=T)
+  )
 
-fig_c = plot_violin(Lf %>% distinct(Participant,PerformanceFeedback,.keep_all=T), "PerformanceFeedback","FeedbackSenseDiff.f",
-            "“With this feedback, I sensed the \n difference between the three algorithms.”")
+Lfp = Lf %>% group_by(Participant,PerformanceFeedback) %>%
+  summarize(
+    FeedbackEasyToInterpret = mean(FeedbackEasyToInterpret, na.rm=T),
+    FeedbackAppeal = mean(FeedbackAppeal, na.rm=T),
+    FeedbackCorrespond = mean(FeedbackCorrespond, na.rm=T),
+    FeedbackEncourage = mean(FeedbackEncourage, na.rm=T),
+    FeedbackDistract = mean(FeedbackDistract, na.rm=T)
+  )
+
+plot_likert <- function(dataset, xlabel, ylabel, desc) {
+  df = data.frame(x = dataset[[xlabel]],
+                  y = dataset[[ylabel]])
+  
+  number_of_samples = df %>% group_by(x) %>% summarize(
+    n = n()
+  ) %>% summarize(n = unique(n)) %>% pull(n)
+  
+  number_of_x = df %>% summarize(n = length(unique(df$x))) %>% pull(n)
+  
+  
+  df = df %>% drop_na()
+  dfb = df %>% 
+    group_by(x,y) %>%
+    summarize(quant = n())
+
+  dfb = dfb %>% ungroup() %>% complete(x,y, fill = list(quant = 0))
+  
+  
+  # generate missing numbers
+  
+  
+  custom_colors <- c("#93c777ff", "#c6e299ff","#f3e4d5ff","#f3e4d5ff", "#f6c0cdff","#ec8ba5ff")
+  
+  dfbp = dfb %>% mutate(value_pct = (quant/number_of_samples)*100,
+                       value_pct = case_when(y >= 4 ~ value_pct,
+                                             y <= 3 ~ -value_pct,
+                                             TRUE ~ value_pct))
+  
+  fig_c <- fig %>%
+    add_trace(name="1", data=dfbp %>% filter(y == 1), y=~x, x=~value_pct, color=I("#ec8ba5ff"), opacity=.8,base=dfbp %>% filter(y == 3) %>% pull(value_pct) + dfbp %>% filter(y == 2) %>% pull(value_pct),
+              type='bar', text=~paste0(round(quant)),textposition='auto', textfont = list(color = "black", size = 14)) %>%
+    add_trace(name="2", data=dfbp %>% filter(y == 2), y=~x, x=~value_pct, color=I("#f6c0cdff"), opacity=.8,base=dfbp %>% filter(y == 3) %>% pull(value_pct),
+              type='bar', text=~paste0(round(quant)),textposition='auto', textfont = list(color = "black", size = 14)) %>%
+    add_trace(name="3", data=dfbp %>% filter(y == 3), y=~x, x=~value_pct, color=I("#f6dfdbff"), opacity=.8,
+              type='bar', text=~paste0(round(quant)),textposition='auto', textfont = list(color = "black", size = 14)) %>%
+    add_trace(name="4", data=dfbp %>% filter(y == 4), y=~x, x=~value_pct, color=I("#f3e4d5ff"), opacity=.8,base=0,
+              type='bar', text=~paste0(round(quant)),textposition='auto', textfont = list(color = "black", size = 14)) %>%
+    add_trace(name="5", data=dfbp %>% filter(y == 5), y=~x, x=~value_pct, color=I("#eaf3caff"), opacity=.8,base=dfbp %>% filter(y == 4) %>% pull(value_pct),
+              type='bar', text=~paste0(round(quant)),textposition='auto', textfont = list(color = "black", size = 14)) %>%
+    add_trace(name="6", data=dfbp %>% filter(y == 6), y=~x, x=~value_pct, color=I("#c6e299ff"), opacity=.8,base=dfbp %>% filter(y == 5) %>% pull(value_pct) + dfbp %>% filter(y == 4) %>% pull(value_pct),
+              type='bar', text=~paste0(round(quant)),textposition='auto', textfont = list(color = "black", size = 14)) %>%
+    add_trace(name="7", data=dfbp %>% filter(y == 7), y=~x, x=~value_pct, color=I("#93c777ff"), opacity=.8,base=dfbp %>% filter(y == 6) %>% pull(value_pct) + dfbp %>% filter(y == 5) %>% pull(value_pct) + dfbp %>% filter(y == 4) %>% pull(value_pct),
+              type='bar', text=~paste0(round(quant)),textposition='auto', textfont = list(color = "black", size = 14)) %>%
+    layout(margin=list(l=0,r=0,t=55,b=0),
+           barmode = 'stack',showlegend=F,
+           title = desc,
+           yaxis=list(range=c(-0.5,number_of_x + 0.1),title=" "),
+           xaxis=list(range=c(-100,100),title=desc,showticklabels = FALSE,ticks=""))
+  fig_c
+  return(fig_c)
+}
+
+subplot(
+  plot_likert(Lf %>% distinct(Participant,PerformanceFeedback,.keep_all=T), "PerformanceFeedback","FeedbackEasyToInterpret",
+              "“It was easy to interpret the information provided by the feedback.”"),
+  plot_likert(Lf %>% distinct(Participant,JudgementType,.keep_all=T), "JudgementType","FeedbackEasyToInterpret",
+              "“It was easy to interpret the information provided by the feedback.”"),
+  margin=0.03
+)
+
+subplot(
+plot_likert(Lf %>% distinct(Participant,FeedbackMetric,.keep_all=T), "FeedbackMetric","FeedbackEasyToInterpret",
+            "“It was easy to interpret the information provided by the feedback.”"),
+plot_likert(Lf %>% distinct(Participant,FeedbackMetric,.keep_all=T), "FeedbackMetric","FeedbackAppeal",
+            "“The feedback appealed to me.”"),
+plot_likert(Lf %>% distinct(Participant,FeedbackMetric,.keep_all=T), "FeedbackMetric","FeedbackCorrespond",
+            "“The feedback matched my own sense of how well I was doing.”"),
+plot_likert(Lf %>% distinct(Participant,FeedbackMetric,.keep_all=T), "FeedbackMetric","FeedbackEncourage",
+            "“The feedback encouraged me to perform better.”"),
+plot_likert(Lf %>% distinct(Participant,FeedbackMetric,.keep_all=T), "FeedbackMetric","FeedbackDistract",
+            "“The feedback distracted me.”"),
+nrows=3,
+margin=0.04,
+titleX=T
+)
+
+subplot(
+plot_violin(Lf %>% distinct(Participant,PerformanceFeedback,.keep_all=T), "PerformanceFeedback","FeedbackEasyToInterpret",
+            "“It was easy to interpret the information provided by the feedback.”"),
+plot_violin(Lf %>% distinct(Participant,JudgementType,.keep_all=T), "JudgementType","FeedbackEasyToInterpret",
+            "“It was easy to interpret the information provided by the feedback.”")
+)
+
+subplot(
+plot_scatter(Lf %>% distinct(Participant,FeedbackMetric,.keep_all=T), xlabel =  "FeedbackMetric",
+             ylabel = "FeedbackEasyToInterpret", plabel = "Participant",
+             desc = "“With this feedback, I sensed the \n difference between the three algorithms.”",
+             xtitle = " ", 
+             ytitle = " ", 
+             miny = -0.15, 
+             maxy = 7.35,
+             jit = 2.50),
+plot_scatter(Lf %>% distinct(Participant,FeedbackMetric,.keep_all=T), xlabel = "FeedbackMetric",
+             ylabel = "FeedbackEasyToInterpret", plabel = "Participant",
+             desc = "“With this feedback, I sensed the \n difference between the three algorithms.”",
+             xtitle = " ", 
+             ytitle = " ", 
+             miny = -0.15, 
+             maxy = 7.35,
+             jit = 2.50
+             )
+)
+
+
+
+fig_c
 orca(fig_c, "fig/condition_feedbackSenseDiff_violin.pdf", width=325, height=355)
 
 fig_c = plot_violin(Lf %>% distinct(Participant,PerformanceFeedback,.keep_all=T), "PerformanceFeedback","FeedbackDistract.f",
@@ -918,7 +1481,7 @@ fig_c = plot_violin(Lf %>% distinct(Participant,PerformanceFeedback,.keep_all=T)
             "Overall, How good did the feedback feel?")
 orca(fig_c, "fig/condition_feedbackQuality_violin.pdf", width=325, height=355)
 
-fig_c = plot_violin(Lf, "FeedbackJudge","AlgoCorrespondFastSlow.f",
+fig_c = plot_violin(Lf, "FeedbackJudge","FeedbackCorrespond.f",
             "With this algorithm, the feedback clearly \n corresponded to whether I was fast or slow.")
 orca(fig_c, "fig/condition_feedbackAlgoCorrespond_violin.pdf", width=725, height=555)
 
@@ -1658,7 +2221,7 @@ m.pj = clmm(data=Sc, as.ordered(Correspondence) ~ `Performance Feedback` * `Perf
 m.pj.summary <- summary(m.pj)
 fixedtable = as.data.frame(m.pj.summary$coefficients) %>% 
   rownames_to_column("Fixed Effect") %>%
-  mutate(Predicted = "AlgoCorrespondFastSlow.f") 
+  mutate(Predicted = "FeedbackCorrespond.f") 
 
 
 
@@ -1713,12 +2276,13 @@ fixedtable <- fixedtable %>% group_by(Predicted) %>%
 # 2) Going up to peak velocity
 # 3) Slowing down/approaching target
 
-fig %>% add_trace(data=Sa, x=~FeedbackJudge, y=~duration, type='box')
-fig %>% add_trace(data=Sa, x=~FeedbackJudge, y=~straightness, type='box')
-fig %>% add_trace(data=Sa, x=~FeedbackJudge, y=~travel_arm, type='box')
-fig %>% add_trace(data=Sa, x=~FeedbackJudge, y=~peak_speed_smooth, type='box')
-fig %>% add_trace(data=Sa, x=~Participant, y=~, type='box')
-fig %>% add_trace(data=Sa, x=~Participant,color=~PerformanceFeedback,y=~peak_speed_smooth, type='box', color=I("rgba(50, 50, 50, 1)"))
+#fig %>% add_trace(data=Sa, x=~FeedbackJudge, y=~duration, type='box')
+#fig %>% add_trace(data=Sa, x=~FeedbackJudge, y=~straightness, type='box')
+#fig %>% add_trace(data=Sa, x=~FeedbackJudge, y=~travel_arm, type='box')
+#fig %>% add_trace(data=Sa, x=~FeedbackJudge, y=~peak_speed_smooth, type='box')
+#fig %>% add_trace(data=Sa, x=~Participant, y=~, type='box')
+#fig %>% add_trace(data=Sa, x=~Participant,color=~PerformanceFeedback,y=~peak_speed_smooth, type='box', color=I("rgba(50, 50, 50, 1)"))
+
 
 
 plot_bar <- function(dataset, xlabel, ylabel, desc,xtitle,ytitle,miny,maxy,lwidth,overlay = "") {
@@ -2474,7 +3038,7 @@ Sc2 = Sa2 %>% group_by(Participant, FeedbackJudge.f) %>%
     `Peak Speed (m/s)` = mean(peak_speed_smooth),
     `Time to Peak Speed (ms)` = mean(time_to_peak_speed_smooth_ms),
     `Peak Speed to Target (\\%)` = mean(peak_speed_smooth_to_target_pct),
-    `Correspondence` = unique(AlgoCorrespondFastSlow.f),
+    `Correspondence` = unique(FeedbackCorrespond.f),
     MiniPatternLabel = paste(unique(MiniPatternLabel),collapse=", "),
     `Performance Feedback` = unique(PerformanceFeedback.f),
     `Performance Metric` = unique(JudgementType),
@@ -2789,6 +3353,31 @@ plot_action(Sa_a, mean_trajectory_df)
 # Fine Movement Deceleration Phase
 # Hover Movement Activation Phase
 # Corrective feedback is the last 10% of the motion
+
+### Bar plot of the different things we need to judge
+# SSc Plots
+###
+# bars + speed chart
+fig %>% add_trace(data=Ssc %>% filter(Participant %in% c(6)),
+                    x=~PatternSegmentLabel, y=~`Throughput (bits/s)`, color=~FeedbackJudge, type='scatter',mode='markers', hoverinfo='text',
+                    marker = list(width = 3)) %>%
+        add_trace(data=Sa,
+                  x=~PatternSegmentLabel, y=~`throughput`, color=~FeedbackJudge, type='scatter',mode='markers', hoverinfo='text',
+                  marker = list(width = 3),opacity=0.5)
+
+fig %>% add_trace(data=Ssc,
+                  x=~PerformanceFeedback, y=~`Throughput (bits/s)`, type='scatter',mode='markers', hoverinfo='text',
+                  marker = list(color = '#8d9096ff', width = 3))
+fig %>% add_trace(data=Ssc,
+                  x=~JudgementType, y=~`Throughput (bits/s)`, type='scatter',mode='markers', hoverinfo='text',
+                  marker = list(color = '#8d9096ff', width = 3))
+
+
+
+fig1 = fig %>% add_trace(data=Ssc %>% filter(Participant %in% c(6)),
+                  x=~Order.f, y=~`Throughput (bits/s)`, type='scatter',mode='markers', hoverinfo='text',
+                  marker = list(width = 3))
+fig1
 
 
 ### Estimate how much time participants spent.
